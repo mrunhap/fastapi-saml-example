@@ -1,0 +1,179 @@
+* Introduction
+Here is an exemplification of employing FastAPI and [[https://github.com/SAML-Toolkits/python3-saml][python3-saml]] libraries to
+implement a Service Provider (SP) functionality to facilitate Single Sign-On
+(SSO) integration.
+
+* Purpose of This Example
+
+I recently needed to use FastAPI to implement SSO based on SAML, acting as a
+Service Provider (SP). When I checked the [[https://github.com/SAML-Toolkits/python3-saml][python3-saml]] library, I found that
+it didn't have an example for FastAPI, but have Flask. Since I'm not very
+familiar with Python, having a FastAPI example would be really helpful. Then I
+found [[https://github.com/ais-one/fastapi-saml][fastapi-saml]], which was very simple and easy to understand, and it
+helped me a lot.
+
+During this time, I still ran into many issues. Now, I want to share the
+solutions I found and my example, hoping it can help others just as
+[[https://github.com/ais-one/fastapi-saml][fastapi-saml]] helped me.
+
+* What This Example Does Not Include
+
+This example focuses specifically on implementing the login functionality within
+the SAML protocol. It does not include other functionalities, such as logout.
+
+* Features Included in This Example
+
+- Implementing a Service Provider (SP) with login functionality.
+- Generating Service Provider metadata.
+- Providing example configuration files and using MockSAML, so you don't need to
+  run an Identity Provider (IdP) via Docker for local development.
+
+* How to Use This Example
+
+1. *Clone the Repository*:
+
+   #+begin_src bash
+   git clone https://github.com/mrunhap/fastapi-saml-example && cd fastapi-saml-example
+   #+end_src
+
+2. *Set Up Python Environment*:
+
+   #+begin_src bash
+   python -m venv .venv
+   source .venv/bin/activate
+   #+end_src
+
+3. *Install Dependencies*:
+
+   #+begin_src bash
+   pip install .
+   #+end_src
+
+4. *Run the Application*:
+
+   #+begin_src bash
+   uvicorn main:app --reload --port 8080
+   #+end_src
+
+Navigate to http://127.0.0.1:8080/docs and test the endpoint
+~/api/sso/saml/metadata~ to download the metadata file. The [[https://github.com/SAML-Toolkits/python3-saml][python3-saml]] library
+will automatically read and parse files in the ~saml~ directory, generating the
+required XML file. For more details, refer to the [[https://github.com/SAML-Toolkits/python3-saml?tab=readme-ov-file#settings][settings]].
+
+To access the SSO SAML login, visit http://127.0.0.1:8080/api/sso/saml/login.
+This will generate a specific URL that you need to open manually, redirecting
+you to the Identity Provider (IdP) login page.
+
+After successfully logging into the IdP, it will make a request to the callback
+URL http://127.0.0.1:8080/api/sso/saml/callback with attributes, typically
+containing user information.
+
+The callback function will use this user information to generate a JSON Web
+Token (JWT). The user will then be redirected to the frontend application, which
+will receive the token, completing the login process and granting the user
+access to the service.
+
+* Inside the Code: Rationale and Problem Solving
+
+** Backend Behind Nginx with HTTPS
+
+#+begin_src python
+    forwarded_proto = (
+        request.headers.get("X-Forwarded-Proto", "").strip() or request.url.scheme
+    )
+    rv = {
+        "https": "on" if forwarded_proto == "https" else "off",
+#+end_src
+
+This is necessary for setups where your backend is behind Nginx and accessed
+through HTTPS, but Nginx communicates with your backend using HTTP. Your SP
+setting’s SingleSignOn URL is also HTTPS, so you might encounter the following
+error:
+
+#+begin_example
+Error when processing SAML Response: invalid_response The response was received at http://your-domain.com/api/sso/saml/callback instead of https://your-domain.com/api/sso/saml/callback
+#+end_example
+
+To resolve this, the code checks both ~request.url.scheme~ and the
+~X-Forwarded-Proto~ header in the request. Make sure to add the following to
+your Nginx configuration:
+
+#+begin_src conf
+location / {
+    proxy_pass         http://127.0.0.1:8080;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+#+end_src
+
+** CORS Error When Redirecting to IdP
+
+#+begin_src python
+    return callback_url
+#+end_src
+
+To address the CORS errors encountered during redirection to the Identity
+Provider (IdP) login page, it's better to handle this navigation differently.
+Instead of using a ~RedirectResponse~, which can sometimes trigger CORS policy
+issues, you can return the callback URL to your client application.
+
+By doing the redirection on the front end, you avoid the CORS issue altogether.
+The client can then directly navigate to the IdP login page without being
+affected by the same-origin policy enforced by CORS. This approach provides more
+control over the redirection process and minimizes potential browser security
+restrictions.
+
+**  405 Method Not Allowed
+
+#+begin_src python
+    return RedirectResponse(
+        "/#/?token=" + access_token, status_code=status.HTTP_302_FOUND
+    )
+#+end_src
+
+The default value for the ~status_code~ attribute in a ~RedirectResponse~ is
+~307~. This status code preserves the POST method during redirection, which is
+similar to the behavior of a callback API. However, this can cause issues if the
+frontend is to handle POST requests.
+
+To avoid this issue, change the status code to ~302~. This will switch the
+redirection to use the GET method, allowing the JSON Web Token (JWT) to be
+correctly established and received by the frontend as intended.
+
+* Real-World SP and IdP Integration Steps
+
+1. *Metadata Exchange*: Initially, establish communication with the Identity
+   Provider (IdP) to exchange metadata. Update the configuration settings in
+   your SAML service (~saml/settings.json~) and generate a metadata XML file
+   using the provided API. Send this XML file to the IdP. You will also receive
+   an XML file from the IdP, which should be updated in the IdP configuration
+   section within your local SAML configuration file.
+
+2. *Frontend Request for SSO Login*: The user initiates a request from the
+   frontend to the ~/api/sso/saml/login~ endpoint. Upon receiving the request,
+   the service should handle the SSO process by redirecting the browser to the
+   URL provided in the response, which leads to the IdP login interface.
+
+3. *User Authentication*: The user completes the authentication process at the
+   IdP. This step ensures that the user’s credentials are verified by the IdP
+   before proceeding.
+
+4. *IdP Callback with SAML Assertion*: After successful authentication, the IdP
+   sends a SAML assertion to the Service Provider’s callback URL
+   (~/api/sso/saml/callback~) with user attributes. This assertion confirms
+   successful authentication and includes necessary user information.
+
+5. *JWT Token Generation and Redirection*: Upon validating and processing the SAML
+   assertion, the Service Provider’s callback function generates a JSON Web
+   Token (JWT) for session management. The function then redirects the user back
+   to the frontend application.
+
+6. *Frontend Login Completion*: The frontend application retrieves the JWT and
+   completes the login process using this token to authenticate subsequent
+   requests within the application.
+
+* Contributing
+
+I have only scratched the surface in understanding and implementing SAML with
+FastAPI. If you encounter any issues or have suggestions for improvement, please
+feel free to open an issue or submit a pull request. Your contributions are
+greatly appreciated!
